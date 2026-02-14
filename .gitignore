@@ -1,0 +1,6 @@
+.env
+venv/
+workspace/
+__pycache__/
+*.pyc
+=12.20.0
