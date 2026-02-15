@@ -48,12 +48,26 @@ class MonitorAgent:
             "error_category": None,
             "fix_strategy": None,
             "confidence": 0.0,
+            # Stage 2: AI analysis
+            "analysis_result": None,
+            "parallel_strategies": [],
+            # Generation
             "fix_attempts": [],
             "current_attempt": 1,
             "max_attempts": Config.MAX_ATTEMPTS,
+            # Stage 2: Parallel fixes
+            "parallel_fix_attempts": [],
+            "best_fix_index": None,
+            # Stage 2: Build errors for self-correction
+            "build_errors": [],
+            # Testing
             "test_results": None,
+            # Stage 2: Approval
+            "approval": None,
+            # Output
             "pr_url": None,
             "pr_number": None,
+            # Tracking
             "decisions": [],
             "status": "detecting",
             "failure_reason": None

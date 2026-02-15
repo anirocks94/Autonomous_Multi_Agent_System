@@ -34,6 +34,12 @@ class Config:
     WORKING_DIR = Path(os.getenv("WORKING_DIR", "./workspace"))
     WORKING_DIR.mkdir(exist_ok=True)
 
+    # LangSmith Tracing
+    LANGSMITH_TRACING = os.getenv("LANGSMITH_TRACING", "false")
+    LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY", "")
+    LANGSMITH_PROJECT = os.getenv("LANGSMITH_PROJECT", "autonomous-debug-agent")
+    LANGSMITH_ENDPOINT = os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
+
     @classmethod
     def validate(cls):
         """Validate required configuration."""
@@ -48,3 +54,15 @@ class Config:
         missing = [key for key in required if not getattr(cls, key)]
         if missing:
             raise ValueError(f"Missing required config: {', '.join(missing)}")
+
+    @classmethod
+    def setup_langsmith(cls):
+        """Configure LangSmith tracing environment variables."""
+        if cls.LANGSMITH_TRACING.lower() == "true" and cls.LANGSMITH_API_KEY:
+            os.environ["LANGSMITH_TRACING"] = "true"
+            os.environ["LANGSMITH_API_KEY"] = cls.LANGSMITH_API_KEY
+            os.environ["LANGSMITH_PROJECT"] = cls.LANGSMITH_PROJECT
+            os.environ["LANGSMITH_ENDPOINT"] = cls.LANGSMITH_ENDPOINT
+            print(f"   LangSmith tracing enabled (project: {cls.LANGSMITH_PROJECT})")
+        else:
+            print("   LangSmith tracing disabled (set LANGSMITH_TRACING=true to enable)")

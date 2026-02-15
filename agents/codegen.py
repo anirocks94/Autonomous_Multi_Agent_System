@@ -27,6 +27,7 @@ class CodeGenAgent:
         code_context = state["code_context"]
         strategy = state["fix_strategy"]
         attempt = state["current_attempt"]
+        build_errors = state.get("build_errors", [])
 
         # Read the full file content
         full_file_path = os.path.join(state["repo_path"], code_context["file_path"])
@@ -36,8 +37,11 @@ class CodeGenAgent:
         except FileNotFoundError:
             full_file_content = code_context["code_snippet"]
 
-        # Build prompt
-        prompt = self._build_prompt(error_event, code_context, strategy, attempt, full_file_content)
+        # Build prompt (includes build errors for self-correction)
+        prompt = self._build_prompt(
+            error_event, code_context, strategy, attempt,
+            full_file_content, build_errors
+        )
 
         # Call Azure OpenAI
         print(f"   Calling Azure OpenAI {self.deployment} (attempt {attempt})...")
@@ -77,7 +81,10 @@ class CodeGenAgent:
             "agent": "codegen",
             "decision_point": "fix_generated",
             "choice": strategy,
-            "reasoning": f"Generated fix using {strategy} strategy with {self.deployment}",
+            "reasoning": f"Generated fix using {strategy} strategy with {self.deployment}" + (
+                f" (self-correcting from {len(build_errors)} previous build error(s))"
+                if build_errors else ""
+            ),
             "timestamp": datetime.now()
         }
         state["decisions"].append(decision)
@@ -86,8 +93,77 @@ class CodeGenAgent:
 
         return state
 
-    def _build_prompt(self, error_event, code_context, strategy, attempt, full_file_content) -> str:
+    def generate_single_strategy(self, state: DebugState) -> dict:
+        """Generate a fix for a single strategy (used by Send API for parallel execution).
+
+        Receives state with a specific fix_strategy set. Returns a partial state
+        update with a single parallel_fix_attempt appended via the reducer.
+        """
+        print(f"\n🛠️  CodeGen Agent: Generating fix for strategy '{state['fix_strategy']}'...")
+
+        error_event = state["error_event"]
+        code_context = state["code_context"]
+        strategy = state["fix_strategy"]
+        attempt = state["current_attempt"]
+        build_errors = state.get("build_errors", [])
+
+        # Read the full file content
+        full_file_path = os.path.join(state["repo_path"], code_context["file_path"])
+        try:
+            with open(full_file_path, 'r') as f:
+                full_file_content = f.read()
+        except FileNotFoundError:
+            full_file_content = code_context["code_snippet"]
+
+        prompt = self._build_prompt(
+            error_event, code_context, strategy, attempt,
+            full_file_content, build_errors
+        )
+
+        print(f"   Calling Azure OpenAI {self.deployment} for strategy '{strategy}'...")
+
+        response = self.client.chat.completions.create(
+            model=self.deployment,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert C# developer specializing in fixing bugs in Azure Functions. You return the COMPLETE fixed file with all using statements, namespace, class definition, and methods intact. Never return partial code."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            max_completion_tokens=4000
+        )
+
+        response_text = response.choices[0].message.content
+        fixed_code = self._extract_code(response_text)
+
+        fix_attempt: FixAttempt = {
+            "attempt_number": attempt,
+            "strategy": strategy,
+            "fixed_code": fixed_code,
+            "reasoning": response_text
+        }
+
+        print(f"   ✅ Fix generated for strategy '{strategy}'")
+
+        # Return partial state update — the reducer (operator.add) appends to parallel_fix_attempts
+        return {"parallel_fix_attempts": [fix_attempt]}
+
+    def _build_prompt(self, error_event, code_context, strategy, attempt,
+                      full_file_content, build_errors=None) -> str:
         """Build prompt for Azure OpenAI."""
+
+        # Build self-correction context from previous build errors
+        build_error_context = ""
+        if build_errors:
+            build_error_context = "\n\n**⚠️ PREVIOUS BUILD ERRORS (DO NOT repeat these mistakes):**\n"
+            for err in build_errors:
+                build_error_context += f"\n--- Attempt {err['attempt_number']} failed with: ---\n"
+                build_error_context += f"```\n{err['error_output'][:500]}\n```\n"
+            build_error_context += "\nFix the ORIGINAL error while avoiding the build errors shown above.\n"
 
         prompt = f"""You are a C# debugging expert. Fix this error in an Azure Function.
 
@@ -108,7 +184,7 @@ class CodeGenAgent:
 
 **Fix Strategy:** {strategy}
 **Attempt:** {attempt}/3
-
+{build_error_context}
 **Instructions:**
 1. Fix ONLY the specific error at line {code_context['line_number']}
 2. Keep the fix minimal - do NOT change anything else

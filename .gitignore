@@ -3,4 +3,5 @@ venv/
 workspace/
 __pycache__/
 *.pyc
-=12.20.0
+workflow_graph.png
+workflow_graph.mmd
