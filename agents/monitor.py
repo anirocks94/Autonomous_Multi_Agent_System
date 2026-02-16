@@ -64,6 +64,19 @@ class MonitorAgent:
             "test_results": None,
             # Stage 2: Approval
             "approval": None,
+            # Stage 3: Review feedback
+            "review_comments": [],
+            "parsed_feedback": None,
+            "review_poll_count": 0,
+            "max_review_polls": Config.MAX_REVIEW_POLLS,
+            "reviewer_feedback_context": None,
+            # Stage 3: Escalation
+            "escalation": None,
+            # Stage 3: Supervisor
+            "supervisor_decisions": [],
+            # Stage 4: Agentic outputs
+            "investigation_output": None,
+            "fix_output": None,
             # Output
             "pr_url": None,
             "pr_number": None,

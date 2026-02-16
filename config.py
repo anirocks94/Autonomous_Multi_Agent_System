@@ -30,6 +30,10 @@ class Config:
     POLLING_INTERVAL_SECONDS = int(os.getenv("POLLING_INTERVAL_SECONDS", "300"))
     ERROR_FREQUENCY_THRESHOLD = int(os.getenv("ERROR_FREQUENCY_THRESHOLD", "3"))
 
+    # Review & Escalation Settings (Stage 3)
+    MAX_REVIEW_POLLS = int(os.getenv("MAX_REVIEW_POLLS", "20"))
+    REVIEW_POLL_INTERVAL_SECONDS = int(os.getenv("REVIEW_POLL_INTERVAL_SECONDS", "30"))
+
     # Working Directory
     WORKING_DIR = Path(os.getenv("WORKING_DIR", "./workspace"))
     WORKING_DIR.mkdir(exist_ok=True)
@@ -54,6 +58,17 @@ class Config:
         missing = [key for key in required if not getattr(cls, key)]
         if missing:
             raise ValueError(f"Missing required config: {', '.join(missing)}")
+
+    @classmethod
+    def get_llm(cls):
+        """Return an AzureChatOpenAI instance for use with LangGraph agents."""
+        from langchain_openai import AzureChatOpenAI
+        return AzureChatOpenAI(
+            azure_endpoint=cls.AZURE_OPENAI_ENDPOINT,
+            api_key=cls.AZURE_OPENAI_API_KEY,
+            azure_deployment=cls.AZURE_OPENAI_DEPLOYMENT,
+            api_version=cls.AZURE_OPENAI_API_VERSION,
+        )
 
     @classmethod
     def setup_langsmith(cls):

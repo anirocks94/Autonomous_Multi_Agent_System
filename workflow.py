@@ -1,145 +1,235 @@
-"""LangGraph workflow orchestration with parallel strategies, self-correction, and human approval."""
-import os
+"""LangGraph workflow — Stage 4 agentic architecture.
+
+The Investigator and Fixer are true ReAct agents (create_react_agent sub-graphs)
+that autonomously decide which tools to call. The outer graph orchestrates them
+alongside deterministic nodes (clone, approve, PR, review loop).
+"""
 from langgraph.graph import StateGraph, END
-from langgraph.types import Send, interrupt
+from langgraph.types import interrupt
 from langgraph.checkpoint.memory import InMemorySaver
-from state import DebugState, Decision
-from agents.analyzer import AnalyzerAgent
-from agents.codegen import CodeGenAgent
-from agents.tester import TesterAgent
+from state import DebugState, Decision, FixAttempt
+from agents.investigator import create_investigator
+from agents.fixer import create_fixer
 from agents.pr_creator import PRCreatorAgent
-from typing import Literal
+from agents.review_parser import ReviewParserAgent
+from agents.validator import ValidationAgent
+from agents.escalator import EscalationAgent
+from agents.supervisor import SupervisorAgent
+from utils.repo_manager import RepoManager
+from tools import investigation_tools, fixer_tools
 from datetime import datetime
 
 
 def create_workflow():
-    """Create the Stage 2 debugging workflow graph with parallel strategies and human approval."""
-    analyzer = AnalyzerAgent()
-    codegen = CodeGenAgent()
-    tester = TesterAgent()
+    """Create the Stage 4 agentic debugging workflow."""
+    repo_manager = RepoManager()
+    investigator_agent = create_investigator()
+    fixer_agent = create_fixer()
     pr_creator = PRCreatorAgent()
+    review_parser = ReviewParserAgent()
+    validator = ValidationAgent()
+    escalator = EscalationAgent()
+    supervisor = SupervisorAgent()
 
-    # --- Node functions ---
+    # ── Node: Clone Repository ──────────────────────────────────────
 
-    def fan_out_strategies(state: DebugState) -> list:
-        """Fan out to parallel strategy generation using Send API."""
-        strategies = state.get("parallel_strategies", [])
-        if not strategies:
-            strategies = [state.get("fix_strategy", "defensive_try_catch")]
-
-        print(f"\n⚡ Fan-out: Launching {len(strategies)} parallel fix strategies: {strategies}")
-
-        sends = []
-        for strategy in strategies:
-            sends.append(Send("generate_strategy", {
-                **state,
-                "fix_strategy": strategy
-            }))
-        return sends
-
-    def pick_best(state: DebugState) -> DebugState:
-        """Pick the best fix from parallel attempts by trying dotnet build on each."""
-        print("\n🏆 Pick Best: Evaluating parallel fix attempts...")
-
-        parallel_attempts = state.get("parallel_fix_attempts", [])
-        if not parallel_attempts:
-            print("   ❌ No parallel fix attempts found")
-            state["status"] = "failed"
-            state["failure_reason"] = "No fix attempts generated"
-            return state
-
-        print(f"   Evaluating {len(parallel_attempts)} fix attempts...")
-
-        code_context = state["code_context"]
-        repo_path = state["repo_path"]
-        file_path = os.path.join(repo_path, code_context["file_path"])
-
-        # Save original file content to restore between attempts
-        try:
-            with open(file_path, 'r') as f:
-                original_content = f.read()
-        except FileNotFoundError:
-            original_content = None
-
-        best_index = None
-        for i, attempt in enumerate(parallel_attempts):
-            print(f"   [{i+1}/{len(parallel_attempts)}] Testing strategy: {attempt['strategy']}...")
-            build_ok, build_output = tester.build_check_for_pick_best(
-                repo_path, file_path, attempt["fixed_code"]
-            )
-            if build_ok:
-                best_index = i
-                print(f"   ✅ Strategy '{attempt['strategy']}' compiles successfully!")
-                break
-            else:
-                print(f"   ❌ Strategy '{attempt['strategy']}' failed to compile")
-                # Restore original for next attempt
-                if original_content is not None:
-                    with open(file_path, 'w') as f:
-                        f.write(original_content)
-
-        if best_index is not None:
-            state["best_fix_index"] = best_index
-            best = parallel_attempts[best_index]
-            # Promote the best parallel fix into the main fix_attempts list
-            state["fix_attempts"].append(best)
-            state["fix_strategy"] = best["strategy"]
-            print(f"   🏆 Selected strategy: {best['strategy']}")
-        else:
-            # None compiled — record build error from last attempt for self-correction
-            print("   ❌ No strategy compiled. Will retry if attempts remain.")
-            state["best_fix_index"] = None
-            if parallel_attempts:
-                last = parallel_attempts[-1]
-                state["fix_attempts"].append(last)
+    def clone_repo_node(state: DebugState) -> DebugState:
+        """Clone the Azure DevOps repository."""
+        print("\n📦 Cloning repository...")
+        repo_path = repo_manager.clone_repo(state["session_id"])
+        state["repo_path"] = repo_path
 
         decision: Decision = {
-            "agent": "pick_best",
-            "decision_point": "strategy_selection",
-            "choice": parallel_attempts[best_index]["strategy"] if best_index is not None else "none_compiled",
-            "reasoning": f"Evaluated {len(parallel_attempts)} strategies, "
-                         + (f"selected '{parallel_attempts[best_index]['strategy']}'" if best_index is not None
-                            else "none compiled successfully"),
+            "agent": "clone",
+            "decision_point": "repo_cloned",
+            "choice": "success",
+            "reasoning": f"Cloned repo to {repo_path}",
+            "timestamp": datetime.now()
+        }
+        state["decisions"].append(decision)
+        print(f"   ✅ Repository cloned to {repo_path}")
+        return state
+
+    # ── Node: Investigate (ReAct Agent) ─────────────────────────────
+
+    def investigate_node(state: DebugState) -> DebugState:
+        """Invoke the Investigator ReAct agent to autonomously explore the error."""
+        print("\n🔬 Investigator Agent: Starting autonomous investigation...")
+        repo_path = state["repo_path"]
+
+        # Set repo_path for investigation tools
+        investigation_tools.set_repo_path(repo_path)
+
+        # Build the user message with error details
+        error = state["error_event"]
+        user_message = f"""Investigate this runtime error:
+
+**Error Type:** {error['error_type']}
+**Error Message:** {error['message']}
+**Stack Trace:**
+{error['stack_trace']}
+**Frequency:** {error['frequency']} occurrences
+
+Find the root cause, the exact file and line, and recommend a fix strategy."""
+
+        # Invoke the investigator agent
+        result = investigator_agent.invoke({
+            "messages": [{"role": "user", "content": user_message}]
+        })
+
+        # Extract structured response
+        investigation = result.get("structured_response")
+        if investigation is None:
+            state["status"] = "failed"
+            state["failure_reason"] = "Investigator agent did not produce structured output"
+            print("   ❌ Investigation failed — no structured output")
+            return state
+
+        # Store Stage 4 investigation output
+        state["investigation_output"] = {
+            "root_cause": investigation.root_cause,
+            "error_category": investigation.error_category,
+            "file_path": investigation.file_path,
+            "line_number": investigation.line_number,
+            "method_name": investigation.method_name,
+            "class_name": investigation.class_name,
+            "code_snippet": investigation.code_snippet,
+            "fix_strategy": investigation.fix_strategy,
+            "confidence": investigation.confidence,
+            "additional_context": investigation.additional_context,
+            "affected_files": investigation.affected_files,
+        }
+
+        # Populate legacy fields for downstream compatibility (PR creator, etc.)
+        state["code_context"] = {
+            "file_path": investigation.file_path,
+            "line_number": investigation.line_number,
+            "code_snippet": investigation.code_snippet,
+            "method_name": investigation.method_name,
+            "class_name": investigation.class_name,
+        }
+        state["error_category"] = investigation.error_category
+        state["fix_strategy"] = investigation.fix_strategy
+        state["confidence"] = investigation.confidence
+        state["status"] = "analyzing"
+
+        decision: Decision = {
+            "agent": "investigator",
+            "decision_point": "investigation_complete",
+            "choice": investigation.fix_strategy,
+            "reasoning": investigation.root_cause,
             "timestamp": datetime.now()
         }
         state["decisions"].append(decision)
 
+        print(f"   ✅ Investigation complete")
+        print(f"      Root cause: {investigation.root_cause}")
+        print(f"      File: {investigation.file_path}:{investigation.line_number}")
+        print(f"      Strategy: {investigation.fix_strategy}")
+        print(f"      Confidence: {investigation.confidence:.2f}")
         return state
 
-    def test_node(state: DebugState) -> DebugState:
-        """Run build validation on the selected fix."""
-        # If pick_best already found a compiling fix, just confirm
-        if state.get("best_fix_index") is not None:
-            print("\n🧪 Tester Agent: Build already validated by pick_best")
-            state["test_results"] = {"total": 1, "passed": 1, "failed": 0, "failed_tests": []}
-            state["status"] = "testing"
-            decision: Decision = {
-                "agent": "tester",
-                "decision_point": "test_evaluation",
-                "choice": "success",
-                "reasoning": f"Build validated during pick_best (strategy: {state['fix_strategy']})",
-                "timestamp": datetime.now()
-            }
-            state["decisions"].append(decision)
-            print(f"   ✅ Build passed")
+    # ── Node: Fix (ReAct Agent) ─────────────────────────────────────
+
+    def fix_node(state: DebugState) -> DebugState:
+        """Invoke the Fixer ReAct agent to autonomously fix and validate the error."""
+        print("\n🛠️  Fixer Agent: Starting autonomous fix generation...")
+        repo_path = state["repo_path"]
+
+        # Set repo_path for fixer tools
+        fixer_tools.set_repo_path(repo_path)
+
+        # Build user message with investigation context
+        inv = state["investigation_output"]
+        error = state["error_event"]
+        reviewer_ctx = state.get("reviewer_feedback_context") or ""
+
+        user_message = f"""Fix this error based on the investigation results:
+
+**Error:** {error['error_type']}: {error['message']}
+**File:** {inv['file_path']}:{inv['line_number']}
+**Method:** {inv['method_name']} in class {inv['class_name']}
+**Root Cause:** {inv['root_cause']}
+**Recommended Strategy:** {inv['fix_strategy']}
+**Additional Context:** {inv['additional_context']}
+"""
+        if reviewer_ctx:
+            user_message += f"\n**REVIEWER FEEDBACK (must address):**\n{reviewer_ctx}\n"
+
+        user_message += "\nRead the file, write the fix, and verify it builds."
+
+        # Invoke the fixer agent
+        result = fixer_agent.invoke({
+            "messages": [{"role": "user", "content": user_message}]
+        })
+
+        # Extract structured response
+        fix = result.get("structured_response")
+        if fix is None:
+            state["status"] = "failed"
+            state["failure_reason"] = "Fixer agent did not produce structured output"
+            print("   ❌ Fix failed — no structured output")
             return state
 
-        # No fix compiled in pick_best — run tester to record build error
-        return tester.run_tests(state)
+        # Store Stage 4 fix output
+        state["fix_output"] = {
+            "fixed_file_path": fix.fixed_file_path,
+            "strategy_used": fix.strategy_used,
+            "fix_description": fix.fix_description,
+            "build_passed": fix.build_passed,
+            "attempts_made": fix.attempts_made,
+            "final_code": fix.final_code,
+        }
 
-    def increment_attempt(state: DebugState) -> DebugState:
-        """Increment the attempt counter and clear parallel attempts for next round."""
-        state["current_attempt"] = state["current_attempt"] + 1
-        state["parallel_fix_attempts"] = []
-        state["best_fix_index"] = None
-        print(f"\n🔄 Retrying (attempt {state['current_attempt']}/{state['max_attempts']})...")
+        # Populate legacy fields for downstream compatibility
+        fix_attempt: FixAttempt = {
+            "attempt_number": state["current_attempt"],
+            "strategy": fix.strategy_used,
+            "fixed_code": fix.final_code,
+            "reasoning": fix.fix_description,
+        }
+        state["fix_attempts"].append(fix_attempt)
+        state["fix_strategy"] = fix.strategy_used
+
+        if fix.build_passed:
+            state["test_results"] = {
+                "total": 1, "passed": 1, "failed": 0, "failed_tests": []
+            }
+            state["status"] = "generating"
+            print(f"   ✅ Fix generated and build passed")
+        else:
+            state["test_results"] = {
+                "total": 1, "passed": 0, "failed": 1,
+                "failed_tests": ["Build failed after agent attempts"]
+            }
+            state["status"] = "failed"
+            state["failure_reason"] = (
+                f"Build failed after {fix.attempts_made} fixer agent attempt(s)"
+            )
+            print(f"   ❌ Build failed after {fix.attempts_made} attempt(s)")
+
+        decision: Decision = {
+            "agent": "fixer",
+            "decision_point": "fix_generated",
+            "choice": fix.strategy_used,
+            "reasoning": (
+                f"{'Build passed' if fix.build_passed else 'Build failed'} "
+                f"after {fix.attempts_made} attempt(s): {fix.fix_description}"
+            ),
+            "timestamp": datetime.now()
+        }
+        state["decisions"].append(decision)
+
+        print(f"      Strategy: {fix.strategy_used}")
+        print(f"      Description: {fix.fix_description}")
         return state
+
+    # ── Node: Approval Gate (interrupt) ─────────────────────────────
 
     def approve_node(state: DebugState):
         """Human-in-the-loop approval gate. Pauses workflow for review."""
         print("\n⏸️  Approval Gate: Waiting for human review...")
 
-        # Build a summary for the reviewer
         fix = state["fix_attempts"][-1] if state["fix_attempts"] else None
         summary = {
             "error_type": state["error_event"]["error_type"],
@@ -152,10 +242,8 @@ def create_workflow():
             "fixed_code_preview": fix["fixed_code"][:500] if fix else "N/A"
         }
 
-        # interrupt() pauses the graph and returns the summary to the caller
         human_review = interrupt(summary)
 
-        # When resumed, human_review contains the approval decision
         approval_status = human_review.get("decision", "rejected")
         feedback = human_review.get("feedback", "")
 
@@ -185,91 +273,77 @@ def create_workflow():
 
         return state
 
-    # --- Routing functions ---
-
-    def should_retry(state: DebugState) -> Literal["retry", "approve", "fail"]:
-        """Decide whether to retry, go to approval, or fail."""
-        test_results = state["test_results"]
-        current_attempt = state["current_attempt"]
-        max_attempts = state["max_attempts"]
-
-        if test_results["failed"] == 0:
-            return "approve"
-
-        if current_attempt >= max_attempts:
-            print(f"\n❌ Max attempts ({max_attempts}) reached. Giving up.")
-            state["status"] = "failed"
-            state["failure_reason"] = f"Build failed after {max_attempts} attempts"
-            return "fail"
-
-        return "retry"
-
-    def after_approval(state: DebugState) -> Literal["create_pr", "retry", "reject"]:
-        """Route based on human approval decision."""
-        approval = state.get("approval")
-        if not approval:
-            return "reject"
-
-        status = approval["status"]
-        if status == "approved":
-            return "create_pr"
-        elif status == "changes_requested":
-            # Treat as retry if attempts remain
-            if state["current_attempt"] < state["max_attempts"]:
-                return "retry"
-            return "reject"
-        else:
-            return "reject"
-
-    # --- Build the graph ---
+    # ── Build the graph ─────────────────────────────────────────────
 
     workflow = StateGraph(DebugState)
 
-    # Add nodes
-    workflow.add_node("analyze", analyzer.analyze)
-    workflow.add_node("generate_strategy", codegen.generate_single_strategy)
-    workflow.add_node("pick_best", pick_best)
-    workflow.add_node("test", test_node)
-    workflow.add_node("increment_attempt", increment_attempt)
+    # Nodes
+    workflow.add_node("clone_repo", clone_repo_node)
+    workflow.add_node("investigate", investigate_node)
+    workflow.add_node("fix", fix_node)
     workflow.add_node("approve", approve_node)
     workflow.add_node("create_pr", pr_creator.create_pr)
+    workflow.add_node("poll_reviews", review_parser.poll_and_parse)
+    workflow.add_node("validate_feedback", validator.validate)
+    workflow.add_node("escalate", escalator.escalate)
 
-    # Set entry point
-    workflow.set_entry_point("analyze")
+    # Entry point
+    workflow.set_entry_point("clone_repo")
 
-    # Edges — fan_out_strategies returns Send() objects targeting "generate_strategy"
+    # ── Edges ───────────────────────────────────────────────────────
+
+    # Linear: clone → investigate → fix
+    workflow.add_edge("clone_repo", "investigate")
+    workflow.add_edge("investigate", "fix")
+
+    # fix → supervisor routes
     workflow.add_conditional_edges(
-        "analyze", fan_out_strategies, path_map=["generate_strategy"]
-    )
-    workflow.add_edge("generate_strategy", "pick_best")
-    workflow.add_edge("pick_best", "test")
-
-    workflow.add_conditional_edges(
-        "test",
-        should_retry,
+        "fix",
+        supervisor.route_after_fix,
         {
-            "retry": "increment_attempt",
             "approve": "approve",
-            "fail": END
+            "fail": END,
         }
     )
 
+    # approve → supervisor routes
     workflow.add_conditional_edges(
         "approve",
-        after_approval,
+        supervisor.route_after_approval,
         {
             "create_pr": "create_pr",
-            "retry": "increment_attempt",
-            "reject": END
+            "retry": "fix",
+            "reject": END,
         }
     )
 
-    # increment_attempt fans out again
+    # create_pr → poll_reviews
+    workflow.add_edge("create_pr", "poll_reviews")
+
+    # poll_reviews → supervisor routes
     workflow.add_conditional_edges(
-        "increment_attempt", fan_out_strategies, path_map=["generate_strategy"]
+        "poll_reviews",
+        supervisor.route_after_poll,
+        {
+            "parse_reviews": "validate_feedback",
+            "poll_again": "poll_reviews",
+            "timeout": "escalate",
+        }
     )
 
-    workflow.add_edge("create_pr", END)
+    # validate_feedback → supervisor routes
+    workflow.add_conditional_edges(
+        "validate_feedback",
+        supervisor.route_after_review,
+        {
+            "incorporate_feedback": "fix",
+            "escalate": "escalate",
+            "done": END,
+        }
+    )
+
+    # escalate → END
+    workflow.add_edge("escalate", END)
 
     # Compile with checkpointer for interrupt support
     checkpointer = InMemorySaver()

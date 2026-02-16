@@ -135,7 +135,6 @@ def _print_summary(final_state):
     print(f"{'=' * 60}")
     print(f"Status: {final_state.get('status', 'unknown')}")
     print(f"Session ID: {final_state.get('session_id', 'unknown')}")
-    print(f"Attempts: {final_state.get('current_attempt', 'N/A')}")
     print(f"Model: {Config.AZURE_OPENAI_DEPLOYMENT}")
 
     if final_state.get('status') == 'pr_created':
@@ -146,14 +145,49 @@ def _print_summary(final_state):
         approval = final_state.get('approval')
         feedback = approval.get('reviewer_feedback', '') if approval else ''
         print(f"🚫 Rejected by reviewer: {feedback}")
+    elif final_state.get('status') == 'escalated':
+        esc = final_state.get('escalation')
+        if esc:
+            print(f"⬆️  Escalated: Work item #{esc.get('work_item_id', 'N/A')}")
+            print(f"   Reason: {esc.get('reason', 'N/A')}")
+            if esc.get('work_item_url'):
+                print(f"   URL: {esc['work_item_url']}")
 
-    parallel_count = len(final_state.get('parallel_fix_attempts', []))
-    if parallel_count > 0:
-        print(f"Parallel strategies evaluated: {parallel_count}")
+    # Stage 4: Investigation results
+    inv = final_state.get('investigation_output')
+    if inv:
+        print(f"\nInvestigation (ReAct Agent):")
+        print(f"  Root cause: {inv['root_cause']}")
+        print(f"  Category: {inv['error_category']}")
+        print(f"  File: {inv['file_path']}:{inv['line_number']}")
+        print(f"  Strategy: {inv['fix_strategy']}")
+        print(f"  Confidence: {inv['confidence']:.2f}")
+        if inv.get('affected_files'):
+            print(f"  Affected files: {', '.join(inv['affected_files'])}")
 
-    build_errors = final_state.get('build_errors', [])
-    if build_errors:
-        print(f"Build errors (self-corrected): {len(build_errors)}")
+    # Stage 4: Fix results
+    fix = final_state.get('fix_output')
+    if fix:
+        print(f"\nFix (ReAct Agent):")
+        print(f"  Strategy: {fix['strategy_used']}")
+        print(f"  Description: {fix['fix_description']}")
+        print(f"  Build: {'PASSED' if fix['build_passed'] else 'FAILED'}")
+        print(f"  Agent attempts: {fix['attempts_made']}")
+
+    # Review feedback
+    if final_state.get('parsed_feedback'):
+        fb = final_state['parsed_feedback']
+        print(f"\nReview Feedback:")
+        print(f"  Status: {fb['approval_status']} ({fb['sentiment']})")
+        print(f"  Summary: {fb['overall_summary']}")
+
+    # Supervisor decisions
+    sup_decisions = final_state.get('supervisor_decisions', [])
+    if sup_decisions:
+        print(f"\nSupervisor Routing ({len(sup_decisions)} decisions):")
+        for sd in sup_decisions:
+            llm_tag = " [LLM]" if sd.get('used_llm') else ""
+            print(f"  🧭 {sd['decision_point']}{llm_tag}: {sd['chosen_route']} — {sd['reasoning']}")
 
     print(f"\nDecision Trail:")
     for decision in final_state.get('decisions', []):
@@ -165,8 +199,8 @@ def _print_summary(final_state):
 def main():
     """Run the autonomous debugging agent."""
     print("=" * 60)
-    print("🤖 Autonomous C# Debugging Agent — Stage 2")
-    print("   (Azure OpenAI | Parallel Strategies | Human Approval)")
+    print("🤖 Autonomous C# Debugging Agent — Stage 4")
+    print("   (True Agentic: Investigator + Fixer with ReAct Tool Use)")
     print("=" * 60)
 
     try:

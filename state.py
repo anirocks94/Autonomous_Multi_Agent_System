@@ -71,6 +71,73 @@ class ApprovalInfo(TypedDict):
     reviewed_at: Optional[datetime]
 
 
+class ReviewComment(TypedDict):
+    """A single parsed review comment from a PR."""
+    comment_id: int
+    author: str
+    content: str
+    file_path: Optional[str]
+    line_number: Optional[int]
+    thread_status: Optional[str]
+    created_date: str
+
+
+class ParsedReviewFeedback(TypedDict):
+    """Structured feedback extracted from PR review comments."""
+    approval_status: Literal['approved', 'changes_requested', 'rejected', 'pending']
+    sentiment: Literal['positive', 'neutral', 'negative', 'critical']
+    change_requests: List[str]
+    affected_lines: List[int]
+    affected_files: List[str]
+    overall_summary: str
+    raw_comments: List[ReviewComment]
+
+
+class EscalationInfo(TypedDict):
+    """Information about an escalation to human developers."""
+    work_item_id: Optional[int]
+    work_item_url: Optional[str]
+    reason: str
+    assigned_to: Optional[str]
+    escalated_at: datetime
+    context_summary: str
+
+
+class SupervisorDecision(TypedDict):
+    """A routing decision made by the supervisor."""
+    decision_point: str
+    available_routes: List[str]
+    chosen_route: str
+    reasoning: str
+    used_llm: bool
+    timestamp: datetime
+
+
+class InvestigationOutput(TypedDict):
+    """Structured investigation results from the Investigator Agent (Stage 4)."""
+    root_cause: str
+    error_category: str
+    file_path: str
+    line_number: int
+    method_name: str
+    class_name: str
+    code_snippet: str
+    fix_strategy: str
+    confidence: float
+    additional_context: str
+    affected_files: List[str]
+
+
+class FixOutput(TypedDict):
+    """Structured fix results from the Fixer Agent (Stage 4)."""
+    fixed_file_path: str
+    strategy_used: str
+    fix_description: str
+    build_passed: bool
+    attempts_made: int
+    final_code: str
+
+
 class DebugState(TypedDict):
     """Complete state for the debugging workflow."""
     # Input
@@ -109,6 +176,23 @@ class DebugState(TypedDict):
     # Approval (Stage 2)
     approval: Optional[ApprovalInfo]
 
+    # Review feedback (Stage 3)
+    review_comments: List[ReviewComment]
+    parsed_feedback: Optional[ParsedReviewFeedback]
+    review_poll_count: int
+    max_review_polls: int
+    reviewer_feedback_context: Optional[str]
+
+    # Escalation (Stage 3)
+    escalation: Optional[EscalationInfo]
+
+    # Supervisor (Stage 3)
+    supervisor_decisions: List[SupervisorDecision]
+
+    # Agentic investigation & fix (Stage 4)
+    investigation_output: Optional[InvestigationOutput]
+    fix_output: Optional[FixOutput]
+
     # Output
     pr_url: Optional[str]
     pr_number: Optional[int]
@@ -117,6 +201,7 @@ class DebugState(TypedDict):
     decisions: List[Decision]
     status: Literal[
         'detecting', 'analyzing', 'generating', 'testing',
-        'pr_created', 'failed', 'awaiting_approval', 'rejected'
+        'pr_created', 'failed', 'awaiting_approval', 'rejected',
+        'awaiting_review', 'incorporating_feedback', 'escalated'
     ]
     failure_reason: Optional[str]
