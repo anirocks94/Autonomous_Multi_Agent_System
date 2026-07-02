@@ -1,4 +1,45 @@
-"""State definitions for the debugging workflow."""
+"""
+State Definitions — Autonomous Debugging Agent (LangGraph TypedDict Contract).
+
+WHAT THIS FILE DOES:
+  Defines every TypedDict that flows through the LangGraph StateGraph.
+  In LangGraph, the "state" is the single source of truth shared across all
+  nodes; every node receives the full state, mutates only the keys it owns,
+  and returns the updated state.  This file is the contract between nodes.
+
+DESIGN PRINCIPLES:
+  1. TypedDict (not Pydantic BaseModel) — LangGraph requires plain-dict
+     serialisability for its checkpointer.  TypedDict gives us static type
+     hints without the Pydantic overhead.
+
+  2. Optional fields represent "not yet computed" stages.  A node should
+     never assume a downstream key is populated.
+
+  3. Annotated[List[…], operator.add] — LangGraph's reducer protocol.
+     The parallel_fix_attempts list uses operator.add as a merge reducer,
+     enabling fan-out/fan-in (Send API) without race conditions.
+
+  4. The Literal type on DebugState.status acts as a compile-time enum,
+     documenting every valid lifecycle state of a workflow session:
+       detecting → analyzing → generating → testing →
+       pr_created / failed / awaiting_approval / rejected /
+       awaiting_review / incorporating_feedback / escalated
+
+STAGED EVOLUTION:
+  ┌──────────┬─────────────────────────────────────────────────────────┐
+  │ Stage 1  │ ErrorEvent, CodeContext, FixAttempt, TestResults        │
+  │ Stage 2  │ AnalysisResult, BuildError, parallel_fix_attempts      │
+  │ Stage 3  │ ReviewComment, ParsedReviewFeedback, EscalationInfo,   │
+  │          │ SupervisorDecision                                      │
+  │ Stage 4  │ InvestigationOutput, FixOutput (ReAct agent outputs)   │
+  │ Stage 5  │ rag_context (injected from ChromaDB retrieval)         │
+  └──────────┴─────────────────────────────────────────────────────────┘
+
+KEY TYPES FOR INTERVIEW DISCUSSION:
+  DebugState  — top-level graph state; all nodes share this dict
+  Decision    — immutable audit-log entry appended by every node
+  SupervisorDecision — routing log entry appended by the Supervisor
+"""
 import operator
 from typing import TypedDict, Optional, List, Literal, Annotated
 from datetime import datetime
@@ -138,11 +179,18 @@ class FixOutput(TypedDict):
     final_code: str
 
 
+class TriageOutput(TypedDict):
+    decision: Literal['FIXABLE', 'DUPLICATE', 'UNFIXABLE']
+    reasoning: str
+
 class DebugState(TypedDict):
     """Complete state for the debugging workflow."""
     # Input
     session_id: str
     error_event: ErrorEvent
+
+    # Triage (Stage 1.5)
+    triage_output: Optional[TriageOutput]
 
     # Repo
     repo_path: Optional[str]
@@ -192,6 +240,9 @@ class DebugState(TypedDict):
     # Agentic investigation & fix (Stage 4)
     investigation_output: Optional[InvestigationOutput]
     fix_output: Optional[FixOutput]
+
+    # RAG context (Stage 5)
+    rag_context: Optional[str]
 
     # Output
     pr_url: Optional[str]

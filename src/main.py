@@ -1,9 +1,52 @@
-"""Main entry point for the autonomous debugging agent."""
+"""
+Terminal Entry Point — Autonomous C# Debugging Agent (Stage 5).
+
+WHAT THIS FILE DOES:
+  Runs the agent in a polling loop from the terminal (as opposed to the
+  Streamlit dashboard in dashboard/app.py).  On each poll cycle it:
+    1. Calls MonitorAgent.detect_errors() — polls Azure Blob Storage for
+       new exception CSV files.
+    2. If an actionable error is found, runs the full LangGraph workflow
+       with interrupt-based human approval.
+    3. Persists the completed workflow outcome to RAG memory (ChromaDB +
+       SQLite) so future runs can retrieve similar past cases.
+    4. Sleeps for POLLING_INTERVAL_SECONDS and repeats.
+
+INTERRUPT-BASED HUMAN-IN-THE-LOOP:
+  LangGraph's interrupt() mechanism is used at the "approve" node.
+  The workflow graph suspends mid-execution, serialises its state into the
+  checkpointer (InMemorySaver), and yields control back to _run_with_approval().
+  The terminal prints a fix summary, collects a human decision (approve /
+  reject / retry), then resumes the graph via Command(resume=decision).
+  This pattern supports multiple back-and-forth cycles without rerunning
+  already-completed nodes.
+
+  Graph execution flow:
+    workflow.stream(initial_state)        ← runs until interrupt or end
+      ↓ snapshot.next is non-empty
+    _display_fix_for_review()             ← show fix summary to human
+    _get_human_decision()                 ← blocking terminal input
+    workflow.stream(Command(resume=…))    ← resume from checkpoint
+      ↓ repeat if another interrupt
+
+KEY FUNCTIONS:
+  main()                    — Entry point; config validation, monitor loop
+  _run_with_approval()      — Drives stream → interrupt → resume cycle
+  _display_fix_for_review() — Renders fix preview for terminal review
+  _get_human_decision()     — Collects approve/reject/retry from stdin
+  _print_summary()          — Prints full workflow audit trail after completion
+  _display_graph()          — Exports Mermaid + PNG of the compiled graph
+
+RUNNING:
+  cd src && python main.py
+  (Requires all environment variables from .env to be set.)
+"""
 import time
 import uuid
 from config import Config
-from agents.monitor import MonitorAgent
-from workflow import create_workflow
+from nodes.monitor import MonitorAgent
+from orchestrator import create_workflow
+from rag.memory import DebugMemory
 from langgraph.types import Command
 
 
@@ -181,6 +224,12 @@ def _print_summary(final_state):
         print(f"  Status: {fb['approval_status']} ({fb['sentiment']})")
         print(f"  Summary: {fb['overall_summary']}")
 
+    # RAG context
+    if final_state.get('rag_context'):
+        print(f"\nRAG Context: ✅ Similar past errors injected into agent prompts")
+    else:
+        print(f"\nRAG Context: (no similar past errors found)")
+
     # Supervisor decisions
     sup_decisions = final_state.get('supervisor_decisions', [])
     if sup_decisions:
@@ -199,8 +248,8 @@ def _print_summary(final_state):
 def main():
     """Run the autonomous debugging agent."""
     print("=" * 60)
-    print("🤖 Autonomous C# Debugging Agent — Stage 4")
-    print("   (True Agentic: Investigator + Fixer with ReAct Tool Use)")
+    print("🤖 Autonomous C# Debugging Agent — Stage 5")
+    print("   (RAG Memory + Streamlit Dashboard)")
     print("=" * 60)
 
     try:
@@ -214,6 +263,8 @@ def main():
 
     monitor = MonitorAgent()
     workflow = create_workflow()
+    memory = DebugMemory.get_instance()
+    print(f"   RAG memory: {memory.memory_count()} stored workflows")
 
     # Display workflow graph on startup
     _display_graph(workflow)
@@ -229,6 +280,8 @@ def main():
                 try:
                     final_state = _run_with_approval(workflow, initial_state)
                     if final_state:
+                        memory.store_outcome(final_state)
+                        print("   💾 Outcome stored in RAG memory")
                         _print_summary(final_state)
                 except Exception as e:
                     print(f"\n❌ Workflow error: {e}")

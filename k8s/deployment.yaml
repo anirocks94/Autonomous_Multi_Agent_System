@@ -1,0 +1,153 @@
+###############################################################
+# Deployment — Autonomous Debug Agent (Streamlit)
+# Image: <YOUR-ACR>.azurecr.io/debug-agent:latest
+# Replicas: Start with 2; HPA manages up to 5
+###############################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: debug-agent
+  namespace: debug-agent
+  labels:
+    app: debug-agent
+    version: "1.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: debug-agent
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0          # Zero-downtime rolling deploy
+  template:
+    metadata:
+      labels:
+        app: debug-agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8501"
+    spec:
+      # ── Security Context ────────────────────────────────
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+
+      # ── Init Container: wait for PVC to be ready ────────
+      initContainers:
+        - name: init-dirs
+          image: busybox:1.36
+          command: ["sh", "-c", "mkdir -p /app/chroma_db /app/data /app/workspace"]
+          volumeMounts:
+            - name: agent-data
+              mountPath: /app/chroma_db
+              subPath: chroma_db
+            - name: agent-data
+              mountPath: /app/data
+              subPath: data
+            - name: agent-data
+              mountPath: /app/workspace
+              subPath: workspace
+
+      # ── Main Container ──────────────────────────────────
+      containers:
+        - name: debug-agent
+          image: <YOUR-ACR>.azurecr.io/debug-agent:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8501
+
+          # ── Environment from Secret ──────────────────────
+          envFrom:
+            - secretRef:
+                name: debug-agent-secrets
+
+          # ── Static env vars ──────────────────────────────
+          env:
+            - name: MAX_ATTEMPTS
+              value: "3"
+            - name: CONFIDENCE_THRESHOLD
+              value: "0.6"
+            - name: POLLING_INTERVAL_SECONDS
+              value: "300"
+            - name: ERROR_FREQUENCY_THRESHOLD
+              value: "3"
+            - name: MAX_REVIEW_POLLS
+              value: "20"
+            - name: REVIEW_POLL_INTERVAL_SECONDS
+              value: "30"
+            - name: CHROMA_DB_PATH
+              value: "/app/chroma_db"
+            - name: SQLITE_DB_PATH
+              value: "/app/data/workflows.db"
+            - name: WORKING_DIR
+              value: "/app/workspace"
+            - name: RAG_COLLECTION_NAME
+              value: "workflow_history"
+            - name: RAG_TOP_K
+              value: "3"
+
+          # ── Volume Mounts ────────────────────────────────
+          volumeMounts:
+            - name: agent-data
+              mountPath: /app/chroma_db
+              subPath: chroma_db
+            - name: agent-data
+              mountPath: /app/data
+              subPath: data
+            - name: agent-data
+              mountPath: /app/workspace
+              subPath: workspace
+
+          # ── Resource Limits ──────────────────────────────
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "3Gi"
+
+          # ── Health Probes ────────────────────────────────
+          startupProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            failureThreshold: 20
+            periodSeconds: 5           # 20x5 = 100s startup window
+
+          livenessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+      # ── Volumes ─────────────────────────────────────────
+      volumes:
+        - name: agent-data
+          persistentVolumeClaim:
+            claimName: debug-agent-data
+
+      # ── Affinity / Spread ────────────────────────────────
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: debug-agent

@@ -1,4 +1,74 @@
-"""Tools for the Investigator Agent — autonomous codebase exploration."""
+"""
+investigation_tools.py
+=======================
+
+WHAT THIS FILE DOES
+-------------------
+Provides the LangChain `@tool`-decorated functions that power the **Investigator Agent**
+sub-graph inside the autonomous debugging pipeline.  The Investigator Agent is the first
+responder: given a raw exception event and a repository path, it autonomously explores
+the codebase to locate the root cause before handing its findings to the Fixer Agent.
+
+HOW IT WORKS
+------------
+1. **Shared repo path** — A module-level variable `_repo_path` stores the absolute
+   path to the target repository.  It is injected once by the outer LangGraph
+   orchestrator via `set_repo_path()` before any tool is invoked.
+
+2. **Tool registration** — Each public function is decorated with
+   `@tool` from `langchain_core.tools`, which wraps it in a `StructuredTool` object
+   understood by LangChain agents and exposes the docstring to the LLM as the tool
+   description, guiding the model on when and how to invoke each capability.
+
+3. **Investigation workflow** — The typical agent loop is:
+   a. `parse_stack_trace` — extract the relevant file path and line number from the
+      raw exception traceback.
+   b. `get_code_context` — retrieve a windowed snippet around the error line.
+   c. `read_file` / `list_files` — inspect related files and directories for broader
+      context (e.g., dependency classes, configuration).
+   d. `grep_codebase` / `find_references` — locate all usages of a suspicious symbol
+      to understand its intended contract.
+   e. `git_log` / `git_diff` — check whether the bug was introduced by a recent commit.
+
+4. **Stack trace resolution** — `parse_stack_trace` uses a regex to extract the raw
+   absolute file path embedded in a C# stack frame, then walks the repository tree
+   with `os.walk` to resolve it to a *relative* path that all other tools can accept.
+
+PUBLIC INTERFACE
+----------------
+set_repo_path(path: str) -> None
+    Must be called once by the orchestrator before any tool is used.
+
+read_file(file_path: str) -> str
+    Returns file content (relative path from repo root) with 1-based line numbers.
+
+grep_codebase(pattern: str, file_glob: str = "*.cs") -> str
+    Regex search across all matching files.  Returns up to 50 matching lines with
+    file paths and line numbers.
+
+list_files(directory: str = "") -> str
+    Lists files and sub-directories under a given directory (relative to repo root).
+    Useful for mapping the project structure before diving into individual files.
+
+get_code_context(file_path: str, line_number: int, context_lines: int = 20) -> str
+    Returns a ±`context_lines` window around `line_number` with the target line
+    highlighted by a `>>>` marker.
+
+find_references(symbol: str) -> str
+    Greps all `.cs` files for `symbol`, returning file paths and matching lines.
+    Useful for tracing how a method or class is called across the codebase.
+
+git_log(file_path: str = "", max_commits: int = 10) -> str
+    Returns recent commit history (one-line format) for the repo or a specific file.
+
+git_diff(file_path: str = "", commits_back: int = 1) -> str
+    Shows a unified diff of recent changes to the repo or a specific file.
+    Output is capped at 3,000 characters to keep token usage reasonable.
+
+parse_stack_trace(stack_trace: str) -> str
+    Parses a C# exception stack trace and returns `"relative/path/File.cs:line_number"`.
+    Resolves absolute paths to repo-relative paths by walking the directory tree.
+"""
 import os
 import re
 import subprocess

@@ -1,0 +1,31 @@
+# Fixer Agent Service
+# CPU-bursty: runs `dotnet build` inside container on top of LLM calls
+# Scale trigger: CPU > 55% (build spikes), Memory > 70%
+FROM python:3.11-slim AS builder
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git wget apt-transport-https && \
+    # Install .NET SDK for `dotnet build` inside this container \
+    wget https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb -O packages-microsoft-prod.deb && \
+    dpkg -i packages-microsoft-prod.deb && \
+    apt-get update && apt-get install -y dotnet-sdk-8.0 && \
+    rm -rf /var/lib/apt/lists/* packages-microsoft-prod.deb
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install --prefix=/install --no-cache-dir -r requirements.txt
+RUN pip install --prefix=/install --no-cache-dir fastapi>=0.111.0 uvicorn[standard]>=0.29.0
+
+FROM python:3.11-slim AS runtime
+WORKDIR /app
+# Copy .NET runtime from builder
+COPY --from=builder /usr/share/dotnet /usr/share/dotnet
+RUN ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet
+COPY --from=builder /install /usr/local
+RUN useradd -m -u 1001 appuser
+COPY src/ ./src/
+RUN mkdir -p ./data ./workspace && chown -R appuser:appuser /app
+USER appuser
+EXPOSE 8002
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/app/src
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"
+ENTRYPOINT ["uvicorn", "agents.fixer_service:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "1"]

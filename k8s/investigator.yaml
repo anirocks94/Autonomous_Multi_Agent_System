@@ -1,0 +1,140 @@
+###############################################################
+# Investigator Agent — Deployment
+# Resource profile: HIGH MEMORY (LLM context windows are large)
+#   Multi-step ReAct: parse_stack_trace → read_file → grep →
+#   get_code_context → find_references → git_log = many LLM calls
+# Scale trigger: Memory > 65%
+###############################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: investigator
+  namespace: debug-agent
+  labels:
+    app: investigator
+    tier: agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: investigator
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: investigator
+        tier: agent
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+
+      containers:
+        - name: investigator
+          image: <YOUR-ACR>.azurecr.io/investigator:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8001
+
+          envFrom:
+            - secretRef:
+                name: debug-agent-secrets
+
+          env:
+            - name: CHROMA_DB_PATH
+              value: "/app/chroma_db"
+            - name: SQLITE_DB_PATH
+              value: "/app/data/workflows.db"
+            - name: WORKING_DIR
+              value: "/app/workspace"
+            - name: RAG_COLLECTION_NAME
+              value: "workflow_history"
+            - name: RAG_TOP_K
+              value: "3"
+            - name: MAX_ATTEMPTS
+              value: "3"
+            - name: CONFIDENCE_THRESHOLD
+              value: "0.6"
+
+          volumeMounts:
+            - name: agent-data
+              mountPath: /app/chroma_db
+              subPath: chroma_db
+            - name: agent-data
+              mountPath: /app/data
+              subPath: data
+            - name: agent-data
+              mountPath: /app/workspace
+              subPath: workspace
+
+          # ── Resource Profile: Memory-dominant ─────────────────────
+          # LLM context windows + intermediate tool results held in RAM
+          # during multi-step ReAct loops (up to ~10 tool calls per run)
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1.5Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"       # generous limit for deep investigations
+
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            failureThreshold: 20
+            periodSeconds: 5
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+      volumes:
+        - name: agent-data
+          persistentVolumeClaim:
+            claimName: debug-agent-data
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: investigator
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: investigator-svc
+  namespace: debug-agent
+  labels:
+    app: investigator
+spec:
+  type: ClusterIP
+  selector:
+    app: investigator
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8001
+      targetPort: 8001

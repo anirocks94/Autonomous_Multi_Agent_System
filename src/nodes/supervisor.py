@@ -1,7 +1,56 @@
-"""Supervisor agent — centralized routing logic for the Stage 4 agentic workflow.
+"""
+Supervisor Agent — Centralised Routing for the LangGraph Outer Workflow.
 
-Rule-based by default, with optional LLM fallback for ambiguous decisions.
-Methods are used as conditional edge functions in the LangGraph workflow.
+WHAT THIS FILE DOES:
+  Implements the "Supervisor" multi-agent pattern: a single deterministic
+  component owns ALL routing decisions in the outer graph.  This is an
+  intentional contrast to the ReAct agents (Investigator, Fixer) which own
+  their own internal decisions.  Having centralised routing makes the graph
+  easier to reason about, test, and extend.
+
+THE SUPERVISOR PATTERN (why not put routing logic in edges?):
+  LangGraph conditional edges accept a plain Python callable.  Instead of
+  inline lambdas scattered across workflow.py, every conditional edge calls
+  a method on SupervisorAgent.  Benefits:
+    - All routing logic in one file → easy to audit (important for prod AI systems)
+    - Rule-based by default → zero LLM latency for happy paths
+    - LLM fallback (_llm_route) available for genuinely ambiguous states
+    - Every decision is logged to state["supervisor_decisions"] for observability
+
+ROUTING DECISION TREE:
+  ┌──────────────────────┬────────────────────────────────────────────┐
+  │ route_after_fix      │ build_passed? → approve : fail (END)      │
+  │ route_after_approval │ approved → create_pr                       │
+  │                      │ changes_requested → retry (back to fix)   │
+  │                      │ rejected → END                             │
+  │ route_after_poll     │ has_comments → parse_reviews               │
+  │                      │ poll_count < max → poll_again              │
+  │                      │ timeout → escalate                         │
+  │ route_after_review   │ escalated → escalate                       │
+  │                      │ pr_created → done (END)                    │
+  │                      │ else → incorporate_feedback (back to fix)  │
+  └──────────────────────┴────────────────────────────────────────────┘
+
+DECISION LOGGING (_log_decision):
+  Every routing call appends a SupervisorDecision TypedDict to
+  state["supervisor_decisions"].  The dashboard and _print_summary()
+  render these, giving full observability into why the graph took each path.
+  The "used_llm" flag distinguishes LLM-assisted decisions from rule-based ones.
+
+LLM FALLBACK (_llm_route):
+  Designed for future extension.  Currently not called in any routing method
+  (all paths are deterministic).  If an ambiguous state is added, swap one
+  return value for self._llm_route(state, point, options, context).
+  The LLM is instructed to respond with only the route name — output is
+  validated against the allowed options list before use.
+
+INTERVIEW TALKING POINTS:
+  - Supervisor pattern vs. per-node edge logic: the former is O(1) to audit,
+    the latter scales O(nodes) in complexity.
+  - Rule-based routing + LLM fallback is a common production trade-off:
+    most cases are deterministic; LLM adds robustness for edge cases.
+  - Logging every routing decision into state creates a built-in audit trail
+    — compliance-friendly and essential for production AI systems.
 """
 from typing import List, Literal
 from state import DebugState, SupervisorDecision
@@ -15,6 +64,25 @@ class SupervisorAgent:
     def __init__(self):
         """Initialize supervisor with LLM for ambiguous routing."""
         self.llm = Config.get_llm()
+
+    def route_after_triage(self, state: DebugState) -> Literal["clone", "skip"]:
+        """Route after the Triage agent completes.
+
+        If FIXABLE, proceed to clone repository. Otherwise skip.
+        """
+        triage_output = state.get("triage_output")
+        if not triage_output:
+            choice = "clone"
+            reason = "Missing triage output, defaulting to clone"
+        elif triage_output["decision"] == "FIXABLE":
+            choice = "clone"
+            reason = "Triage decision is FIXABLE"
+        else:
+            choice = "skip"
+            reason = f"Triage decision is {triage_output['decision']}: {triage_output['reasoning']}"
+
+        self._log_decision(state, "aftBuer_triage", ["clone", "skip"], choice, reason)
+        return choice
 
     def route_after_fix(self, state: DebugState) -> Literal["approve", "fail"]:
         """Route after the Fixer agent completes.

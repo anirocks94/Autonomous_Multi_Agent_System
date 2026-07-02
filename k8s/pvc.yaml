@@ -1,0 +1,17 @@
+###############################################################
+# PersistentVolumeClaim — ChromaDB & SQLite shared storage
+# AKS uses Azure Disk CSI (ReadWriteOnce) by default.
+# For multi-pod access, switch to Azure Files (ReadWriteMany).
+###############################################################
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: debug-agent-data
+  namespace: debug-agent
+spec:
+  accessModes:
+    - ReadWriteOnce        # single-pod; change to ReadWriteMany for HPA > 1
+  storageClassName: managed-csi  # AKS default Azure Disk CSI
+  resources:
+    requests:
+      storage: 10Gi

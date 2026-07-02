@@ -1,4 +1,47 @@
-"""PR creator agent - creates pull requests in Azure DevOps."""
+"""
+PR Creator Agent — Automated Pull Request Generation via Azure DevOps REST API.
+
+WHAT THIS FILE DOES:
+  Takes the AI-generated code fix from the Fixer agent and converts it into
+  a proper engineering artifact: a feature branch, a commit, and a draft PR
+  in Azure DevOps, complete with a structured description and a Teams
+  notification to the team.
+
+WORKFLOW (deterministic node, no LLM involved):
+    1. Derive branch name  →  auto-fix/<ErrorType>-<session_id>
+    2. RepoManager.create_branch()  →  git checkout -b
+    3. RepoManager.commit_changes() →  git add + git commit
+    4. RepoManager.push_branch()    →  git push origin
+    5. _create_pr_api()             →  POST /pullrequests (Azure DevOps REST API 7.0)
+    6. TeamsNotifier.notify_pr_generated()  →  Teams webhook card
+
+PR DESCRIPTION (self-documenting):
+  The PR body includes:
+  - Error type, location (file:line), frequency
+  - Fix strategy and confidence score
+  - LLM model used (transparency for reviewers)
+  - Decision trail (append-only audit log from state["decisions"])
+  - isDraft: True — always created as draft to require human merge
+
+AZURE DEVOPS AUTHENTICATION:
+  Basic auth using a Personal Access Token (PAT) encoded as Base64.
+  Header: Authorization: Basic base64(":<PAT>")
+  This is the standard pattern for Azure DevOps REST APIs when not
+  using Azure AD service principals.
+
+TEAMS INTEGRATION:
+  After a successful PR creation, TeamsNotifier.notify_pr_generated() posts
+  a green MessageCard with a "Review PR" action button.  Uses TEAMS_WEBHOOK_URL
+  from Config (optional — silently skipped if not configured).
+
+INTERVIEW TALKING POINTS:
+  - isDraft: True is a deliberate safety measure: AI-generated code should
+    never be auto-merged.  A human must explicitly mark it ready.
+  - The decision trail in the PR description makes the agent's reasoning
+    transparent to reviewers — critical for AI accountability.
+  - Branch naming convention (auto-fix/<type>-<session_id>) keeps branches
+    identifiable and traceable back to the agent run.
+"""
 import requests
 from base64 import b64encode
 from state import DebugState, Decision
@@ -56,6 +99,10 @@ class PRCreatorAgent:
             state["pr_number"] = pr_response.get("pullRequestId")
             state["status"] = "pr_created"
             print(f"   ✅ PR created: {state['pr_url']}")
+            
+            from tools.teams_notifier import TeamsNotifier
+            # Pass the reasoning/strategy back as description
+            TeamsNotifier.notify_pr_generated(state["session_id"], state["pr_url"], state["fix_strategy"])
         else:
             state["status"] = "failed"
             state["failure_reason"] = "Failed to create PR"

@@ -1,4 +1,56 @@
-"""Monitor agent - detects errors from Azure Blob Storage CSV files."""
+"""
+Monitor Agent — Azure Blob Storage Exception Poller & Workflow Trigger.
+
+WHAT THIS FILE DOES:
+  The MonitorAgent is the entry point to the entire autonomous debugging
+  pipeline.  It polls Azure Blob Storage for newly uploaded exception CSV
+  files (exported from Application Insights or a custom telemetry pipeline),
+  determines whether the detected error is "actionable" (i.e. the agent
+  has a known fix strategy for the error type), and if so, constructs the
+  initial DebugState that is fed into the LangGraph workflow.
+
+DETECTION FLOW:
+    BlobMonitor.check_for_new_files()
+        │
+        ├─ No CSV files → return None  (workflow not triggered)
+        │
+        ├─ CSV downloaded → BlobMonitor parses into normalized error_data dict
+        │
+        └─ _is_actionable(error_data)?
+              │
+              ├─ False → return None  (low-frequency / unknown error type)
+              │
+              └─ True  → construct ErrorEvent + DebugState → return state
+
+ACTIONABILITY FILTER (_is_actionable):
+  Only a known allowlist of .NET exception types are handled autonomously:
+    KeyNotFoundException, NullReferenceException, IndexOutOfRangeException,
+    DivideByZeroException, ArgumentNullException, FormatException,
+    ParseException, InvalidOperationException, FileNotFoundException …
+  Errors outside this list (e.g. OutOfMemoryException, custom exceptions)
+  are skipped — the agent would not know how to fix them reliably, and a
+  bad fix is worse than no fix.
+
+INITIAL STATE CONSTRUCTION:
+  The monitor is the ONLY place where a fresh DebugState is created.
+  Every field is explicitly initialised (no implicit None spreading across
+  the graph).  This guarantees that all downstream nodes can safely do
+  state.get("key") without KeyError.
+
+TEAMS NOTIFICATION:
+  After creating the initial state, the workflow's clone_repo node calls
+  TeamsNotifier.notify_exception_received() to alert the team immediately
+  so humans are aware the agent has started working on the error.
+
+INTERVIEW TALKING POINTS:
+  - Polling Azure Blob Storage is a simple, robust trigger mechanism
+    that decouples exception ingestion from the agent runtime.
+  - Allowlist-based actionability filtering prevents the agent from
+    attempting fixes it cannot safely generate — a key safety property
+    for autonomous AI systems.
+  - Creating DebugState here (not lazily inside nodes) makes the full
+    state schema immediately visible and reviewable at workflow start.
+"""
 from datetime import datetime
 from typing import Optional
 from state import DebugState, ErrorEvent, Decision
@@ -77,6 +129,8 @@ class MonitorAgent:
             # Stage 4: Agentic outputs
             "investigation_output": None,
             "fix_output": None,
+            # Stage 5: RAG context
+            "rag_context": None,
             # Output
             "pr_url": None,
             "pr_number": None,

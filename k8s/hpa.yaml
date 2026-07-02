@@ -1,0 +1,43 @@
+###############################################################
+# HorizontalPodAutoscaler
+# Scales debug-agent from 2 → 5 replicas based on CPU & memory.
+# Requires metrics-server (pre-installed on AKS).
+###############################################################
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: debug-agent-hpa
+  namespace: debug-agent
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: debug-agent
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60      # scale out when avg CPU > 60%
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 70      # scale out when avg mem > 70%
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60           # add max 1 pod/minute
+    scaleDown:
+      stabilizationWindowSeconds: 300 # wait 5 min before scaling down
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120          # remove max 1 pod/2 min

@@ -1,4 +1,38 @@
-"""Configuration management for the autonomous debugging agent."""
+"""
+Configuration Management — Autonomous Debugging Agent.
+
+WHAT THIS FILE DOES:
+  Centralises all environment-variable-backed configuration into a single
+  class-level Config object.  Every component imports Config; nothing reads
+  os.getenv() outside this file.  This makes configuration auditable,
+  testable (mock one class), and easy to document.
+
+CONFIGURATION GROUPS:
+  ┌────────────────────────┬────────────────────────────────────────────┐
+  │ Azure OpenAI           │ Endpoint, key, deployment name, API ver.  │
+  │ Azure DevOps           │ Org, project, repo, PAT                   │
+  │ Azure Blob Storage     │ Connection string, container name         │
+  │ MS Teams               │ Incoming Webhook URL (optional)           │
+  │ Agent Behaviour        │ Max attempts, confidence threshold,       │
+  │                        │ polling intervals                          │
+  │ RAG / Persistence      │ ChromaDB path, collection name, top-k,   │
+  │                        │ SQLite DB path                            │
+  │ LangSmith Tracing      │ API key, project, endpoint (optional)    │
+  └────────────────────────┴────────────────────────────────────────────┘
+
+KEY METHODS:
+  validate()        — Raises ValueError if any required key is missing.
+                      Call this at startup before any agent work begins.
+  get_llm()         — Factory for AzureChatOpenAI; all agents use this
+                      so model config changes are made in one place.
+  setup_langsmith() — Optionally enables LangSmith tracing by exporting
+                      the right env vars before the first LangChain call.
+
+INTERVIEW NOTE — why a class, not a module-level dict?
+  Class attributes survive import caching (safe for tests that monkeypatch).
+  @classmethod methods can be mocked via unittest.mock.patch.object without
+  affecting the rest of the session.
+"""
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -24,6 +58,9 @@ class Config:
     AZURE_BLOB_CONNECTION_STRING = os.getenv("AZURE_BLOB_CONNECTION_STRING")
     AZURE_BLOB_CONTAINER = os.getenv("AZURE_BLOB_CONTAINER", "exceptions")
 
+    # MS Teams Integration
+    TEAMS_WEBHOOK_URL = os.getenv("TEAMS_WEBHOOK_URL")
+
     # Agent Settings
     MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "3"))
     CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.6"))
@@ -37,6 +74,12 @@ class Config:
     # Working Directory
     WORKING_DIR = Path(os.getenv("WORKING_DIR", "./workspace"))
     WORKING_DIR.mkdir(exist_ok=True)
+
+    # Stage 5: RAG Memory & Persistence
+    CHROMA_DB_PATH = Path(os.getenv("CHROMA_DB_PATH", "./chroma_db"))
+    RAG_COLLECTION_NAME = os.getenv("RAG_COLLECTION_NAME", "workflow_history")
+    RAG_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
+    SQLITE_DB_PATH = Path(os.getenv("SQLITE_DB_PATH", "./data/workflows.db"))
 
     # LangSmith Tracing
     LANGSMITH_TRACING = os.getenv("LANGSMITH_TRACING", "false")

@@ -1,0 +1,21 @@
+###############################################################
+# Service — ClusterIP (internal only)
+# The ALB Ingress routes external traffic; the Service is
+# accessed by the Ingress controller inside the cluster.
+###############################################################
+apiVersion: v1
+kind: Service
+metadata:
+  name: debug-agent-svc
+  namespace: debug-agent
+  labels:
+    app: debug-agent
+spec:
+  type: ClusterIP
+  selector:
+    app: debug-agent
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 8501

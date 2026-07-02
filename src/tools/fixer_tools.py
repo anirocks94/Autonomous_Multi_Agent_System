@@ -1,4 +1,63 @@
-"""Tools for the Fixer Agent — code modification and build validation."""
+"""
+fixer_tools.py
+==============
+
+WHAT THIS FILE DOES
+-------------------
+Provides the LangChain `@tool`-decorated functions that power the **Fixer Agent**
+sub-graph inside the autonomous debugging pipeline.  The Fixer Agent is responsible
+for understanding a diagnosed bug, patching the relevant source file(s), and
+verifying that the patch actually compiles — all without human involvement.
+
+HOW IT WORKS
+------------
+1. **Shared repo path** — A module-level variable `_repo_path` stores the absolute
+   path to the target repository.  It is injected once by the outer LangGraph
+   orchestrator via `set_repo_path()` before any tool is invoked.  Because
+   LangChain tools are plain Python callables, closure over a module global is the
+   simplest way to share state across tools without threading concerns.
+
+2. **Tool registration** — Each public function is decorated with
+   `@tool` from `langchain_core.tools`, which:
+   - Wraps it in a `StructuredTool` / `Tool` object understood by LangChain agents.
+   - Exposes the function's docstring to the LLM as the tool description, so the
+     model knows *when* and *how* to call it.
+   - Handles argument parsing and serialisation automatically.
+
+3. **Read → Patch → Build loop** — The typical Fixer Agent workflow is:
+   a. Call `read_file` (or `get_code_context`) to retrieve the buggy code.
+   b. Call `write_file` with a fully corrected version of the file.
+   c. Call `run_build` to confirm the change compiles cleanly.
+   d. If the build fails, repeat from (b) with the error output as additional context.
+
+4. **Grep support** — `grep_codebase` lets the agent locate symbol usages or
+   related files before deciding what to patch, reducing the risk of incomplete fixes.
+
+PUBLIC INTERFACE
+----------------
+set_repo_path(path: str) -> None
+    Must be called once by the orchestrator before any tool is used.
+    Sets `_repo_path` for all tools in this module.
+
+read_file(file_path: str) -> str
+    Returns the content of a file (relative to repo root) with 1-based line numbers.
+
+write_file(file_path: str, content: str) -> str
+    Overwrites a file with the *entire* corrected content.  Agents must always
+    supply the full file, not a diff.
+
+run_build() -> str
+    Executes `dotnet build --verbosity quiet` in `_repo_path` and returns a trimmed
+    summary of stdout/stderr plus a SUCCESS or FAILED prefix.
+
+grep_codebase(pattern: str, file_glob: str = "*.cs") -> str
+    Runs GNU `grep -rn` across the repo for `pattern`, filtered by `file_glob`.
+    Returns up to 30 matching lines.
+
+get_code_context(file_path: str, line_number: int, context_lines: int = 20) -> str
+    Returns a ±`context_lines` window around `line_number` with the target line
+    highlighted by a `>>>` marker.
+"""
 import os
 import subprocess
 from langchain_core.tools import tool
