@@ -5,6 +5,3 @@ __pycache__/
 *.pyc
 workflow_graph.png
 workflow_graph.mmd
-chroma_db/
-data/
-local.settings.json
